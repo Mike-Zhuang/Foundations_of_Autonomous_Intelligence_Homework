@@ -58,3 +58,9 @@ logs/
 
 # Operating system
 Thumbs.db
+
+*.zip
+*.tar.gz
+*.tar
+*.rar
+*.7z

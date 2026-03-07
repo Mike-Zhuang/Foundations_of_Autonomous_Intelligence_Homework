@@ -22,6 +22,7 @@ plt.pie(sizes, labels=labels, autopct='%1.1f%%')
 plt.title('Vehicle Type Distribution')
 plt.savefig('vehicle_distribution.png')
 plt.close()
+print("总体车型分布饼图已保存为 vehicle_distribution.png")
 
 # 任务2 统计每个车道中，各类车的占比，为每个车道绘制一个饼图
 
@@ -50,6 +51,7 @@ for lane in lane_vehicle_count:
     plt.pie(sizes, labels=labels, autopct='%1.1f%%')
     plt.title(f'Lane {lane} Vehicle Distribution')
     plt.savefig(f'lane_{lane}_vehicle_distribution.png')
+    print(f"车道 {lane} 车型分布饼图已保存为 lane_{lane}_vehicle_distribution.png")
     plt.close()
 
 
@@ -136,6 +138,7 @@ plt.title('Vehicle Weight Statistics by Lane')
 plt.legend()
 plt.grid(True)
 plt.savefig('lane_weight_analysis.png')
+print("各车道车重统计点线图已保存为 lane_weight_analysis.png")
 plt.close()
 
 # 以下是任务5 选择具有完整数据的某天（24小时完整） 统计每小时车流量，绘制点线图（横坐标：小时0~23，纵坐标：车流量）
