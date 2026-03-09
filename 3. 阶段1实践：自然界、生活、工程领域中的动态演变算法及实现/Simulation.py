@@ -4,6 +4,7 @@ from pathlib import Path
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.path import Path as MplPath
 
 try:
 	import cv2  # Optional dependency for obstacle image import.
@@ -84,6 +85,43 @@ class LBMKarmanSimulation:
 		radius = max(8, self.ny // 10)
 		y, x = np.ogrid[: self.ny, : self.nx]
 		self.obstacle = (x - cx) ** 2 + (y - cy) ** 2 <= radius**2
+
+	def set_naca0012_obstacle(self):
+		"""Create a centered NACA 0012 airfoil obstacle in pixel space."""
+		self.obstacle.fill(False)
+
+		thickness = 0.12
+		chord_px = max(50, self.nx // 4)
+		x_start = self.nx // 5
+		y_mid = self.ny // 2
+		n_pts = max(250, chord_px * 2)
+
+		x = np.linspace(0.0, 1.0, n_pts)
+		yt = 5.0 * thickness * (
+			0.2969 * np.sqrt(np.maximum(x, 1e-12))
+			- 0.1260 * x
+			- 0.3516 * x**2
+			+ 0.2843 * x**3
+			- 0.1015 * x**4
+		)
+
+		x_upper = x
+		y_upper = yt
+		x_lower = x[::-1]
+		y_lower = -yt[::-1]
+
+		x_poly = np.concatenate([x_upper, x_lower]) * chord_px + x_start
+		y_poly = np.concatenate([y_upper, y_lower]) * chord_px + y_mid
+		polygon = np.column_stack([x_poly, y_poly])
+
+		xx, yy = np.meshgrid(np.arange(self.nx), np.arange(self.ny))
+		points = np.column_stack([xx.ravel() + 0.5, yy.ravel() + 0.5])
+		mask = MplPath(polygon, closed=True).contains_points(points).reshape(self.ny, self.nx)
+
+		self.obstacle[mask] = True
+		# Keep inlet region open to avoid fully blocked domain.
+		self.obstacle[:, :3] = False
+		return np.any(self.obstacle)
 
 	def load_obstacle_from_image(self, image_path):
 		if cv2 is None:
@@ -306,6 +344,12 @@ class LBMKarmanSimulation:
 				self.last_action = f"Obstacle loaded: {default_img.name}"
 			else:
 				self.last_action = "Load failed: put obstacle.png in current folder"
+		elif key == "n":
+			if self.set_naca0012_obstacle():
+				self.reset_flow()
+				self.last_action = "Obstacle loaded: NACA 0012 airfoil"
+			else:
+				self.last_action = "NACA load failed"
 		elif key in self.presets:
 			self.set_preset(key)
 
@@ -343,7 +387,7 @@ class LBMKarmanSimulation:
 				f"step={self.frame_count}  tau={self.tau:.3f}  u_in={self.u_in:.3f}  "
 				f"Re~{re:.1f}  brush={self.brush_radius}  mode={'draw' if self.draw_mode else 'erase'}\n"
 				f"keys: space pause | r reset | c clear | d/e draw/erase | +/- brush | "
-				f"arrows tune | 1-4 presets | s snapshot | i load image\n"
+				f"arrows tune | 1-4 presets | s snapshot | i load image | n NACA0012\n"
 				f"last: {self.last_action}"
 			)
 		)
