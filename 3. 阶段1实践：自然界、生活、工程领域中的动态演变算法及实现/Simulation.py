@@ -53,6 +53,14 @@ class LBMKarmanSimulation:
 		self.info_ax = None
 		self.status_text = None
 		self.ani = None
+		self.display_mode = "vorticity"
+		self.maze_flow_score = np.zeros((ny, nx), dtype=np.float64)
+		self.maze_score_alpha = 0.995
+		self.maze_path_mask = np.zeros((ny, nx), dtype=bool)
+		self.maze_path_revealed = np.zeros((ny, nx), dtype=bool)
+		self.maze_path_overlay = None  # RGBA overlay for path highlight
+		self.im_path1 = None
+		self.im_path2 = None
 
 		self.cx_3d = CX[:, None, None]
 		self.cy_3d = CY[:, None, None]
@@ -70,13 +78,19 @@ class LBMKarmanSimulation:
 			loaded = self.load_obstacle_from_image(obstacle_image)
 			if loaded:
 				self.last_action = f"Obstacle loaded: {Path(obstacle_image).name}"
+				# Auto-solve maze when loaded via command line.
+				is_maze = self.solve_maze_bfs()
+				if is_maze:
+					self.display_mode = "maze"
+					self.last_action += " | Path found!"
 			else:
 				self.set_circle_obstacle()
 				self.last_action = "Image load failed, fallback to circle obstacle"
 		else:
 			self.set_circle_obstacle()
 
-		self.reset_flow()
+		# Maze images start from rest so fluid propagates visibly.
+		self.reset_flow(quiescent=(obstacle_mode == "image"))
 
 	def set_circle_obstacle(self):
 		self.obstacle.fill(False)
@@ -86,8 +100,8 @@ class LBMKarmanSimulation:
 		y, x = np.ogrid[: self.ny, : self.nx]
 		self.obstacle = (x - cx) ** 2 + (y - cy) ** 2 <= radius**2
 
-	def set_naca0012_obstacle(self):
-		"""Create a centered NACA 0012 airfoil obstacle in pixel space."""
+	def set_naca0012_obstacle(self, aoa_deg=8.0):
+		"""Create a NACA 0012 airfoil obstacle with optional angle of attack."""
 		self.obstacle.fill(False)
 
 		thickness = 0.12
@@ -112,7 +126,16 @@ class LBMKarmanSimulation:
 
 		x_poly = np.concatenate([x_upper, x_lower]) * chord_px + x_start
 		y_poly = np.concatenate([y_upper, y_lower]) * chord_px + y_mid
-		polygon = np.column_stack([x_poly, y_poly])
+
+		# Rotate around quarter chord to introduce lift-generating asymmetry.
+		pivot_x = x_start + 0.25 * chord_px
+		pivot_y = y_mid
+		theta = np.deg2rad(aoa_deg)
+		x_rel = x_poly - pivot_x
+		y_rel = y_poly - pivot_y
+		x_rot = x_rel * np.cos(theta) - y_rel * np.sin(theta) + pivot_x
+		y_rot = x_rel * np.sin(theta) + y_rel * np.cos(theta) + pivot_y
+		polygon = np.column_stack([x_rot, y_rot])
 
 		xx, yy = np.meshgrid(np.arange(self.nx), np.arange(self.ny))
 		points = np.column_stack([xx.ravel() + 0.5, yy.ravel() + 0.5])
@@ -155,9 +178,13 @@ class LBMKarmanSimulation:
 		u2 = ux**2 + uy**2
 		return W[:, None, None] * rho[None, :, :] * (1.0 + cu + 0.5 * cu**2 - 1.5 * u2[None, :, :])
 
-	def reset_flow(self):
+	def reset_flow(self, quiescent=False):
 		rho0 = np.ones((self.ny, self.nx), dtype=np.float64)
-		ux0 = np.full((self.ny, self.nx), self.u_in, dtype=np.float64)
+		if quiescent:
+			# Start from rest everywhere — fluid must propagate in from the inlet.
+			ux0 = np.zeros((self.ny, self.nx), dtype=np.float64)
+		else:
+			ux0 = np.full((self.ny, self.nx), self.u_in, dtype=np.float64)
 		uy0 = np.zeros((self.ny, self.nx), dtype=np.float64)
 
 		ux0[self.obstacle] = 0.0
@@ -168,7 +195,124 @@ class LBMKarmanSimulation:
 		self.ux = ux0
 		self.uy = uy0
 		self.vorticity = np.zeros_like(rho0)
+		self.maze_flow_score.fill(0.0)
+		self.maze_path_revealed.fill(False)
 		self.frame_count = 0
+
+	def set_right_panel_mode(self, mode):
+		self.display_mode = mode
+		if self.im_vorticity is None or self.ax2 is None:
+			return
+		if mode == "maze":
+			self.im_vorticity.set_cmap("gray")
+			self.im_vorticity.set_clim(0.0, 1.0)
+			if np.any(self.maze_path_mask):
+				self.ax2.set_title("Maze Solution (BFS Shortest Path)", color="#00ff33")
+			else:
+				self.ax2.set_title("Maze (solving...)", color="yellow")
+		else:
+			self.im_vorticity.set_cmap("seismic")
+			self.im_vorticity.set_clim(-0.15, 0.15)
+			self.ax2.set_title("Vorticity (Karman Vortex Street)", color="white")
+
+	def solve_maze_bfs(self):
+		"""BFS shortest path through the maze from left openings to right openings.
+
+		Only considers entrance/exit cells *within* the obstacle's vertical extent,
+		so the path cannot cheat by going around the maze through open padding."""
+		from collections import deque
+
+		self.maze_path_mask.fill(False)
+		ny, nx = self.ny, self.nx
+		free = ~self.obstacle  # True = passable
+
+		# --- Determine the maze bounding box so we restrict entry/exit to it ---
+		obs_ys, obs_xs = np.where(self.obstacle)
+		if obs_ys.size == 0:
+			return False
+		y_min, y_max = int(obs_ys.min()), int(obs_ys.max())
+		x_min, x_max = int(obs_xs.min()), int(obs_xs.max())
+
+		# parent map: -1 = unvisited
+		parent = np.full((ny, nx, 2), -1, dtype=np.int32)
+		queue = deque()
+
+		# Seed: free cells on the LEFT side, only within the obstacle vertical span.
+		for y in range(y_min, y_max + 1):
+			for xs in range(max(0, x_min - 3), x_min + 2):
+				if 0 <= xs < nx and free[y, xs] and parent[y, xs, 0] == -1:
+					parent[y, xs] = [y, xs]  # self-parent = start marker
+					queue.append((y, xs))
+
+		# 4-connected neighbours
+		dirs = [(-1, 0), (1, 0), (0, -1), (0, 1)]
+		target = None
+
+		while queue:
+			cy, cx = queue.popleft()
+			# Reached right side of maze?
+			if cx >= x_max - 1:
+				target = (cy, cx)
+				break
+			for dy, dx in dirs:
+				ny2, nx2 = cy + dy, cx + dx
+				if 0 <= ny2 < ny and 0 <= nx2 < nx and free[ny2, nx2] and parent[ny2, nx2, 0] == -1:
+					parent[ny2, nx2] = [cy, cx]
+					queue.append((ny2, nx2))
+
+		if target is None:
+			return False
+
+		# Trace back from target to start.
+		y, x = target
+		while not (parent[y, x, 0] == y and parent[y, x, 1] == x):
+			self.maze_path_mask[y, x] = True
+			py, px = parent[y, x]
+			y, x = int(py), int(px)
+		self.maze_path_mask[y, x] = True
+
+		# Thicken path by 1 pixel for visibility (avoid np.roll wraparound).
+		thick = self.maze_path_mask.copy()
+		for dy in (-1, 0, 1):
+			for dx in (-1, 0, 1):
+				if dy == 0 and dx == 0:
+					continue
+				shifted = np.zeros_like(self.maze_path_mask)
+				sy = slice(max(0, dy), min(ny, ny + dy))
+				dy_dst = slice(max(0, -dy), min(ny, ny - dy))
+				sx = slice(max(0, dx), min(nx, nx + dx))
+				dx_dst = slice(max(0, -dx), min(nx, nx - dx))
+				shifted[dy_dst, dx_dst] = self.maze_path_mask[sy, sx]
+				thick |= shifted
+		thick &= free
+		self.maze_path_mask = thick
+		thick &= free
+		self.maze_path_mask = thick
+
+		# Don't show path yet — it will be revealed progressively by the fluid.
+		self.maze_path_revealed.fill(False)
+		self._build_path_overlay(reveal_mask=self.maze_path_revealed)
+		return True
+
+	def _build_path_overlay(self, reveal_mask=None):
+		"""Build an RGBA overlay image highlighting the solved path.
+		If reveal_mask is given, only show path cells that are also revealed."""
+		overlay = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
+		if reveal_mask is not None:
+			show = self.maze_path_mask & reveal_mask
+		else:
+			show = self.maze_path_mask
+		overlay[show] = [0.0, 1.0, 0.2, 0.7]
+		self.maze_path_overlay = overlay
+		if self.im_path1 is not None:
+			self.im_path1.set_array(overlay)
+		if self.im_path2 is not None:
+			self.im_path2.set_array(overlay)
+
+	def update_maze_flow_score(self):
+		speed = np.sqrt(self.ux**2 + self.uy**2)
+		speed[self.obstacle] = 0.0
+		self.maze_flow_score = self.maze_score_alpha * self.maze_flow_score + (1.0 - self.maze_score_alpha) * speed
 
 	def apply_inlet(self):
 		ux = np.full(self.ny, self.u_in)
@@ -284,12 +428,20 @@ class LBMKarmanSimulation:
 		y = int(event.ydata)
 		self.add_obstacle_disk(x, y, self.brush_radius, value=self.draw_mode)
 
+	def _clear_maze_path(self):
+		"""Clear maze path data and overlay."""
+		self.maze_path_mask.fill(False)
+		self.maze_path_revealed.fill(False)
+		self._build_path_overlay(reveal_mask=self.maze_path_revealed)
+
 	def set_preset(self, key):
 		if key not in self.presets:
 			return
 		p = self.presets[key]
 		self.tau = p["tau"]
 		self.u_in = p["u_in"]
+		self._clear_maze_path()
+		self.set_right_panel_mode("vorticity")
 		self.reset_flow()
 		self.last_action = p["label"]
 
@@ -302,10 +454,13 @@ class LBMKarmanSimulation:
 			self.paused = not self.paused
 			self.last_action = "Paused" if self.paused else "Running"
 		elif key == "r":
+			self._clear_maze_path()
 			self.reset_flow()
 			self.last_action = "Flow reset"
 		elif key == "c":
 			self.obstacle.fill(False)
+			self._clear_maze_path()
+			self.set_right_panel_mode("vorticity")
 			self.reset_flow()
 			self.last_action = "Obstacle cleared"
 		elif key == "d":
@@ -340,14 +495,35 @@ class LBMKarmanSimulation:
 		elif key == "i":
 			default_img = Path.cwd() / "obstacle.png"
 			if self.load_obstacle_from_image(default_img):
-				self.reset_flow()
-				self.last_action = f"Obstacle loaded: {default_img.name}"
+				self.tau = max(self.tau, 0.62)
+				self.u_in = min(max(self.u_in, 0.07), 0.12)
+				# Start from rest so fluid visibly propagates through the maze.
+				self.reset_flow(quiescent=True)
+				# Auto-solve the maze and display path.
+				found = self.solve_maze_bfs()
+				self.set_right_panel_mode("maze")
+				if found:
+					self.last_action = f"Maze loaded & solved! Path shown in green"
+				else:
+					self.last_action = f"Maze loaded but no path found (left→right)"
 			else:
 				self.last_action = "Load failed: put obstacle.png in current folder"
+		elif key == "m":
+			if self.display_mode == "maze":
+				self.set_right_panel_mode("vorticity")
+				self.last_action = "Display mode: vorticity"
+			else:
+				self.set_right_panel_mode("maze")
+				self.last_action = "Display mode: maze throughflow"
 		elif key == "n":
-			if self.set_naca0012_obstacle():
+			# Tuned defaults for visible lift-like contrast near the airfoil.
+			self.tau = 0.58
+			self.u_in = max(self.u_in, 0.09)
+			if self.set_naca0012_obstacle(aoa_deg=8.0):
+				self._clear_maze_path()
 				self.reset_flow()
-				self.last_action = "Obstacle loaded: NACA 0012 airfoil"
+				self.set_right_panel_mode("vorticity")
+				self.last_action = "Obstacle loaded: NACA 0012 (AoA=8deg, lift demo)"
 			else:
 				self.last_action = "NACA load failed"
 		elif key in self.presets:
@@ -373,13 +549,37 @@ class LBMKarmanSimulation:
 		self.compute_vorticity()
 
 		speed = np.sqrt(self.ux**2 + self.uy**2)
+		non_obstacle_speed = speed[~self.obstacle]
+		dyn_vmax = max(self.u_in * 1.4, 0.1)
+		if non_obstacle_speed.size > 0:
+			dyn_vmax = np.percentile(non_obstacle_speed, 99.5)
+			dyn_vmax = max(dyn_vmax, self.u_in * 1.4, 0.1)
+
 		self.im_speed.set_array(speed)
-		self.im_vorticity.set_array(self.vorticity)
+		self.im_speed.set_clim(0.0, dyn_vmax)
+		self.ax1.set_title("Velocity Magnitude", color="white")
+
+		if self.display_mode == "maze":
+			# Right panel: show obstacle layout in gray, path overlay drawn separately.
+			maze_bg = np.ones((self.ny, self.nx), dtype=np.float64)
+			maze_bg[self.obstacle] = 0.0
+			self.im_vorticity.set_array(maze_bg)
+			self.im_vorticity.set_clim(0.0, 1.0)
+		else:
+			self.im_vorticity.set_array(self.vorticity)
 
 		overlay = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
 		overlay[self.obstacle] = [1.0, 1.0, 1.0, 0.95]
 		self.im_obstacle1.set_array(overlay)
 		self.im_obstacle2.set_array(overlay)
+
+		# Progressive path reveal: light up path cells reached by the fluid.
+		if self.display_mode == "maze" and np.any(self.maze_path_mask):
+			speed_threshold = self.u_in * 0.05
+			newly_reached = self.maze_path_mask & (speed > speed_threshold) & ~self.maze_path_revealed
+			if np.any(newly_reached):
+				self.maze_path_revealed |= newly_reached
+				self._build_path_overlay(reveal_mask=self.maze_path_revealed)
 
 		re = self.reynolds_number()
 		self.status_text.set_text(
@@ -387,18 +587,23 @@ class LBMKarmanSimulation:
 				f"step={self.frame_count}  tau={self.tau:.3f}  u_in={self.u_in:.3f}  "
 				f"Re~{re:.1f}  brush={self.brush_radius}  mode={'draw' if self.draw_mode else 'erase'}\n"
 				f"keys: space pause | r reset | c clear | d/e draw/erase | +/- brush | "
-				f"arrows tune | 1-4 presets | s snapshot | i load image | n NACA0012\n"
+				f"arrows tune | 1-4 presets | s snapshot | i load image | m toggle maze view | n NACA0012+AoA\n"
 				f"last: {self.last_action}"
 			)
 		)
 
-		return [
+		artists = [
 			self.im_speed,
 			self.im_vorticity,
 			self.im_obstacle1,
 			self.im_obstacle2,
 			self.status_text,
 		]
+		if self.im_path1 is not None:
+			artists.append(self.im_path1)
+		if self.im_path2 is not None:
+			artists.append(self.im_path2)
+		return artists
 
 	def build_figure(self):
 		self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(15, 6), facecolor="#2b2b2b")
@@ -414,12 +619,20 @@ class LBMKarmanSimulation:
 		self.ax1.set_title("Velocity Magnitude", color="white")
 
 		self.im_vorticity = self.ax2.imshow(self.vorticity, cmap="seismic", interpolation="nearest", vmin=-0.15, vmax=0.15)
-		self.ax2.set_title("Vorticity (Karman Vortex Street)", color="white")
+		self.set_right_panel_mode(self.display_mode)
 
 		obstacle_overlay = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
 		obstacle_overlay[self.obstacle] = [1.0, 1.0, 1.0, 0.95]
 		self.im_obstacle1 = self.ax1.imshow(obstacle_overlay, interpolation="nearest")
 		self.im_obstacle2 = self.ax2.imshow(obstacle_overlay, interpolation="nearest")
+
+		# Path overlay layers (initially transparent).
+		empty_path = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
+		self.im_path1 = self.ax1.imshow(empty_path, interpolation="nearest")
+		self.im_path2 = self.ax2.imshow(empty_path, interpolation="nearest")
+		if self.maze_path_overlay is not None:
+			self.im_path1.set_array(self.maze_path_overlay)
+			self.im_path2.set_array(self.maze_path_overlay)
 
 		# Dedicated info bar under images so text never blocks the simulation view.
 		self.info_ax = self.fig.add_axes([0.02, 0.02, 0.96, 0.12])
