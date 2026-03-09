@@ -49,6 +49,7 @@ class LBMKarmanSimulation:
 		self.im_vorticity = None
 		self.im_obstacle1 = None
 		self.im_obstacle2 = None
+		self.info_ax = None
 		self.status_text = None
 		self.ani = None
 
@@ -90,8 +91,22 @@ class LBMKarmanSimulation:
 		img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
 		if img is None:
 			return False
-		resized = cv2.resize(img, (self.nx, self.ny), interpolation=cv2.INTER_NEAREST)
-		_, binary = cv2.threshold(resized, 127, 255, cv2.THRESH_BINARY)
+
+		# Keep original aspect ratio: fit image into domain and pad the rest.
+		h, w = img.shape[:2]
+		if h == 0 or w == 0:
+			return False
+		scale = min(self.nx / float(w), self.ny / float(h))
+		new_w = max(1, int(round(w * scale)))
+		new_h = max(1, int(round(h * scale)))
+
+		resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_NEAREST)
+		canvas = np.full((self.ny, self.nx), 255, dtype=np.uint8)
+		y0 = (self.ny - new_h) // 2
+		x0 = (self.nx - new_w) // 2
+		canvas[y0 : y0 + new_h, x0 : x0 + new_w] = resized
+
+		_, binary = cv2.threshold(canvas, 127, 255, cv2.THRESH_BINARY)
 		self.obstacle = binary < 127
 		# Keep inlet region open to avoid fully blocked domain.
 		self.obstacle[:, :3] = False
@@ -362,18 +377,27 @@ class LBMKarmanSimulation:
 		self.im_obstacle1 = self.ax1.imshow(obstacle_overlay, interpolation="nearest")
 		self.im_obstacle2 = self.ax2.imshow(obstacle_overlay, interpolation="nearest")
 
-		self.status_text = self.ax1.text(
+		# Dedicated info bar under images so text never blocks the simulation view.
+		self.info_ax = self.fig.add_axes([0.02, 0.02, 0.96, 0.12])
+		self.info_ax.set_facecolor("#0d0d0d")
+		self.info_ax.set_xticks([])
+		self.info_ax.set_yticks([])
+		for spine in self.info_ax.spines.values():
+			spine.set_visible(False)
+
+		self.status_text = self.info_ax.text(
 			0.01,
-			-0.18,
+			0.5,
 			"",
-			transform=self.ax1.transAxes,
+			transform=self.info_ax.transAxes,
 			color="cyan",
 			fontsize=9,
-			va="top",
+			va="center",
+			ha="left",
 			family="monospace",
 		)
 
-		self.fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.2, wspace=0.08)
+		self.fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.17, wspace=0.08)
 		self.fig.canvas.mpl_connect("button_press_event", self.on_mouse_press)
 		self.fig.canvas.mpl_connect("button_release_event", self.on_mouse_release)
 		self.fig.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
