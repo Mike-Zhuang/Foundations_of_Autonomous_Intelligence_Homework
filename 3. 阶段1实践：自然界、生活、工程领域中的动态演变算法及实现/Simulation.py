@@ -23,7 +23,7 @@ class LBMKarmanSimulation:
 	def __init__(
 		self,
 		ny=200,
-		nx=800,
+		nx=800,#宽 800 列、高 200 行
 		tau=0.56,
 		u_in=0.08,
 		steps_per_frame=6,
