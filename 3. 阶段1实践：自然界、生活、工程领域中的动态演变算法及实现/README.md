@@ -7,7 +7,7 @@
 [![Numpy](https://img.shields.io/badge/Numpy-Optimized-success.svg)](https://numpy.org/)
 [![LBM Model](https://img.shields.io/badge/Model-D2Q9-red.svg)]()
 
-**自然界、生活、工程领域中的动态演变算法及实现** —— 一款拥有大厂级规范与高性能并发计算思路的二维计算流体力学（CFD）交互式实时仿真引擎。基于**格子玻尔兹曼方法（LBM D2Q9）**，支持卡门涡街、迷宫流体寻路求解及空气动力学升力仿真。
+**自然界、生活、工程领域中的动态演变算法及实现** —— 一款拥有高性能并发计算思路的二维计算流体力学（CFD）交互式实时仿真引擎。基于**格子玻尔兹曼方法（LBM D2Q9）**，支持卡门涡街、迷宫流体寻路求解及空气动力学升力仿真。
 
 </div>
 
