@@ -46,14 +46,21 @@ class LBMKarmanSimulation:
 		self.fig = None
 		self.ax1 = None
 		self.ax2 = None
+		self.ax3 = None
 		self.im_speed = None
 		self.im_vorticity = None
 		self.im_obstacle1 = None
 		self.im_obstacle2 = None
+		self.im_core1 = None
+		self.im_core2 = None
 		self.info_ax = None
 		self.status_text = None
 		self.ani = None
 		self.display_mode = "vorticity"
+		self.vorticity_dynamic_scale = True
+		self.show_vortex_cores = True
+		self.enable_initial_perturbation = True
+		self.perturbation_strength = 0.015
 		self.maze_flow_score = np.zeros((ny, nx), dtype=np.float64)
 		self.maze_score_alpha = 0.995
 		self.maze_path_mask = np.zeros((ny, nx), dtype=bool)
@@ -61,6 +68,31 @@ class LBMKarmanSimulation:
 		self.maze_path_overlay = None  # RGBA overlay for path highlight
 		self.im_path1 = None
 		self.im_path2 = None
+		self.q_criterion = np.zeros((ny, nx), dtype=np.float64)
+
+		self.fx_mem = 0.0
+		self.fy_mem = 0.0
+		self.fx_pressure = 0.0
+		self.fy_pressure = 0.0
+		self.gamma = 0.0
+		self.lift_gamma = 0.0
+		self.cd_mem = 0.0
+		self.cl_mem = 0.0
+		self.cd_pressure = 0.0
+		self.cl_pressure = 0.0
+		self.cl_gamma = 0.0
+		self.fx_mem_accum = 0.0
+		self.fy_mem_accum = 0.0
+		self.mem_samples = 0
+
+		self.history_max_points = 900
+		self.time_history = []
+		self.cl_mem_history = []
+		self.cl_pressure_history = []
+		self.cl_gamma_history = []
+		self.line_cl_mem = None
+		self.line_cl_pressure = None
+		self.line_cl_gamma = None
 
 		self.cx_3d = CX[:, None, None]
 		self.cy_3d = CY[:, None, None]
@@ -186,6 +218,8 @@ class LBMKarmanSimulation:
 		else:
 			ux0 = np.full((self.ny, self.nx), self.u_in, dtype=np.float64)
 		uy0 = np.zeros((self.ny, self.nx), dtype=np.float64)
+		if (not quiescent) and self.enable_initial_perturbation:
+			self.apply_initial_perturbation(ux0, uy0)
 
 		ux0[self.obstacle] = 0.0
 		uy0[self.obstacle] = 0.0
@@ -198,6 +232,133 @@ class LBMKarmanSimulation:
 		self.maze_flow_score.fill(0.0)
 		self.maze_path_revealed.fill(False)
 		self.frame_count = 0
+		self.fx_mem = 0.0
+		self.fy_mem = 0.0
+		self.fx_pressure = 0.0
+		self.fy_pressure = 0.0
+		self.gamma = 0.0
+		self.lift_gamma = 0.0
+		self.cd_mem = 0.0
+		self.cl_mem = 0.0
+		self.cd_pressure = 0.0
+		self.cl_pressure = 0.0
+		self.cl_gamma = 0.0
+		self.fx_mem_accum = 0.0
+		self.fy_mem_accum = 0.0
+		self.mem_samples = 0
+		self.time_history.clear()
+		self.cl_mem_history.clear()
+		self.cl_pressure_history.clear()
+		self.cl_gamma_history.clear()
+
+	def apply_initial_perturbation(self, ux, uy):
+		"""Inject a tiny antisymmetric disturbance to trigger vortex shedding earlier."""
+		ys, xs = np.where(self.obstacle)
+		if ys.size == 0:
+			return
+
+		y_mid = 0.5 * (ys.min() + ys.max())
+		x_trailing = int(xs.max()) + 2
+		char_h = max(8, int(ys.max() - ys.min() + 1))
+		sigma_x = max(6.0, 0.8 * char_h)
+		sigma_y = max(6.0, 0.5 * char_h)
+
+		x_grid = np.arange(self.nx, dtype=np.float64)[None, :]
+		y_grid = np.arange(self.ny, dtype=np.float64)[:, None]
+
+		envelope = np.exp(
+			-((x_grid - x_trailing) ** 2) / (2.0 * sigma_x**2)
+			-((y_grid - y_mid) ** 2) / (2.0 * sigma_y**2)
+		)
+		antisym = np.tanh((y_grid - y_mid) / max(1.0, 0.15 * char_h))
+		uy += self.perturbation_strength * self.u_in * envelope * antisym
+		uy[self.obstacle] = 0.0
+
+	def obstacle_characteristic_length(self):
+		ys, _xs = np.where(self.obstacle)
+		if ys.size == 0:
+			return float(max(10, self.ny // 10))
+		return float(max(4, ys.max() - ys.min() + 1))
+
+	def _reference_density(self):
+		if self.rho is None:
+			return 1.0
+		return float(max(1e-8, np.mean(self.rho[:, 0])))
+
+	def _force_to_coeff(self, fx, fy):
+		rho_ref = self._reference_density()
+		d = self.obstacle_characteristic_length()
+		dyn = 0.5 * rho_ref * self.u_in**2 * max(d, 1.0)
+		if dyn <= 1e-12:
+			return 0.0, 0.0
+		cd = fx / dyn
+		cl = fy / dyn
+		return float(cd), float(cl)
+
+	def estimate_momentum_exchange_force(self):
+		"""Approximate force from fluid links that point into obstacle cells."""
+		if not np.any(self.obstacle):
+			return 0.0, 0.0
+
+		fx = 0.0
+		fy = 0.0
+		fluid = ~self.obstacle
+		for i in range(1, 9):
+			neighbor_is_obstacle = np.roll(self.obstacle, shift=(-CY[i], -CX[i]), axis=(0, 1))
+			mask = fluid & neighbor_is_obstacle
+			mask[:, 0] = False
+			mask[:, -1] = False
+			if not self.periodic_y:
+				mask[0, :] = False
+				mask[-1, :] = False
+			if np.any(mask):
+				fi = self.F[i, mask]
+				fx += 2.0 * CX[i] * np.sum(fi)
+				fy += 2.0 * CY[i] * np.sum(fi)
+		return float(fx), float(fy)
+
+	def estimate_pressure_force(self):
+		"""Approximate pressure-integral force using local boundary normals."""
+		if not np.any(self.obstacle):
+			return 0.0, 0.0
+
+		obs_f = self.obstacle.astype(np.float64)
+		gx = np.gradient(obs_f, axis=1)
+		gy = np.gradient(obs_f, axis=0)
+		grad_mag = np.sqrt(gx**2 + gy**2)
+		boundary = self.obstacle & (grad_mag > 1e-10)
+		if not np.any(boundary):
+			return 0.0, 0.0
+
+		nx = -gx / (grad_mag + 1e-12)
+		ny = -gy / (grad_mag + 1e-12)
+		pressure = self.rho / 3.0
+		weight = grad_mag
+
+		fx = -np.sum(pressure[boundary] * nx[boundary] * weight[boundary])
+		fy = -np.sum(pressure[boundary] * ny[boundary] * weight[boundary])
+		return float(fx), float(fy)
+
+	def estimate_circulation_lift(self, margin=8):
+		"""Estimate lift by Kutta-Joukowski from circulation around obstacle."""
+		ys, xs = np.where(self.obstacle)
+		if ys.size == 0:
+			return 0.0, 0.0
+
+		x0 = max(1, int(xs.min()) - margin)
+		x1 = min(self.nx - 2, int(xs.max()) + margin)
+		y0 = max(1, int(ys.min()) - margin)
+		y1 = min(self.ny - 2, int(ys.max()) + margin)
+		if x1 <= x0 or y1 <= y0:
+			return 0.0, 0.0
+
+		top = np.sum(self.ux[y0, x0:x1])
+		right = np.sum(self.uy[y0:y1, x1])
+		bottom = -np.sum(self.ux[y1, x0:x1])
+		left = -np.sum(self.uy[y0:y1, x0])
+		gamma = float(top + right + bottom + left)
+		lift = self._reference_density() * self.u_in * gamma
+		return gamma, float(lift)
 
 	def set_right_panel_mode(self, mode):
 		self.display_mode = mode
@@ -373,11 +534,31 @@ class LBMKarmanSimulation:
 		dux_dy = np.gradient(self.ux, axis=0)
 		self.vorticity = duy_dx - dux_dy
 
+	def compute_q_criterion(self):
+		dux_dx = np.gradient(self.ux, axis=1)
+		dux_dy = np.gradient(self.ux, axis=0)
+		duy_dx = np.gradient(self.uy, axis=1)
+		duy_dy = np.gradient(self.uy, axis=0)
+
+		oxy = 0.5 * (duy_dx - dux_dy)
+		sxx = dux_dx
+		syy = duy_dy
+		sxy = 0.5 * (dux_dy + duy_dx)
+
+		s_norm_sq = sxx**2 + syy**2 + 2.0 * sxy**2
+		self.q_criterion = oxy**2 - 0.5 * s_norm_sq
+		self.q_criterion[self.obstacle] = -np.inf
+
 	def step(self):
 		self.compute_macroscopic()
 
 		feq = self.equilibria(self.rho, self.ux, self.uy)
 		self.F += -(self.F - feq) / self.tau
+
+		fx_mem, fy_mem = self.estimate_momentum_exchange_force()
+		self.fx_mem_accum += fx_mem
+		self.fy_mem_accum += fy_mem
+		self.mem_samples += 1
 
 		# Bounce-back on obstacle (local CA wall rule).
 		for i in range(9):
@@ -526,16 +707,36 @@ class LBMKarmanSimulation:
 				self.last_action = "Obstacle loaded: NACA 0012 (AoA=8deg, lift demo)"
 			else:
 				self.last_action = "NACA load failed"
+		elif key == "k":
+			self.tau = 0.58
+			self.u_in = 0.09
+			self.set_circle_obstacle()
+			self._clear_maze_path()
+			self.set_right_panel_mode("vorticity")
+			self.reset_flow(quiescent=False)
+			for _ in range(220):
+				self.step()
+			self.compute_macroscopic()
+			self.compute_vorticity()
+			self.last_action = "Karman demo preset (circle + warmup + perturbation)"
+		elif key == "p":
+			self.enable_initial_perturbation = not self.enable_initial_perturbation
+			state = "on" if self.enable_initial_perturbation else "off"
+			self.last_action = f"Initial perturbation: {state}"
+		elif key == "v":
+			self.show_vortex_cores = not self.show_vortex_cores
+			state = "on" if self.show_vortex_cores else "off"
+			self.last_action = f"Vortex-core overlay: {state}"
+		elif key == "a":
+			self.vorticity_dynamic_scale = not self.vorticity_dynamic_scale
+			state = "dynamic" if self.vorticity_dynamic_scale else "fixed"
+			self.last_action = f"Vorticity color scale: {state}"
 		elif key in self.presets:
 			self.set_preset(key)
 
 	def reynolds_number(self):
 		# Characteristic length based on obstacle vertical size.
-		ys, xs = np.where(self.obstacle)
-		if ys.size == 0:
-			d = max(10, self.ny // 10)
-		else:
-			d = max(4, ys.max() - ys.min() + 1)
+		d = self.obstacle_characteristic_length()
 		nu = (self.tau - 0.5) / 3.0
 		return self.u_in * d / max(nu, 1e-8)
 
@@ -547,6 +748,36 @@ class LBMKarmanSimulation:
 
 		self.compute_macroscopic()
 		self.compute_vorticity()
+		self.compute_q_criterion()
+
+		if self.mem_samples > 0:
+			self.fx_mem = self.fx_mem_accum / self.mem_samples
+			self.fy_mem = self.fy_mem_accum / self.mem_samples
+			self.fx_mem_accum = 0.0
+			self.fy_mem_accum = 0.0
+			self.mem_samples = 0
+
+		self.fx_pressure, self.fy_pressure = self.estimate_pressure_force()
+		self.gamma, self.lift_gamma = self.estimate_circulation_lift()
+		self.cd_mem, self.cl_mem = self._force_to_coeff(self.fx_mem, self.fy_mem)
+		self.cd_pressure, self.cl_pressure = self._force_to_coeff(self.fx_pressure, self.fy_pressure)
+		_ignored_cd, self.cl_gamma = self._force_to_coeff(0.0, self.lift_gamma)
+
+		self.time_history.append(self.frame_count)
+		self.cl_mem_history.append(self.cl_mem)
+		self.cl_pressure_history.append(self.cl_pressure)
+		self.cl_gamma_history.append(self.cl_gamma)
+		if len(self.time_history) > self.history_max_points:
+			self.time_history.pop(0)
+			self.cl_mem_history.pop(0)
+			self.cl_pressure_history.pop(0)
+			self.cl_gamma_history.pop(0)
+
+		if self.line_cl_mem is not None:
+			xs = np.arange(len(self.time_history), dtype=np.float64)
+			self.line_cl_mem.set_data(xs, np.asarray(self.cl_mem_history))
+			self.line_cl_pressure.set_data(xs, np.asarray(self.cl_pressure_history))
+			self.line_cl_gamma.set_data(xs, np.asarray(self.cl_gamma_history))
 
 		speed = np.sqrt(self.ux**2 + self.uy**2)
 		non_obstacle_speed = speed[~self.obstacle]
@@ -567,11 +798,26 @@ class LBMKarmanSimulation:
 			self.im_vorticity.set_clim(0.0, 1.0)
 		else:
 			self.im_vorticity.set_array(self.vorticity)
+			if self.vorticity_dynamic_scale:
+				vort_vals = np.abs(self.vorticity[~self.obstacle])
+				if vort_vals.size > 0:
+					vlim = max(0.03, float(np.percentile(vort_vals, 99.0)))
+					self.im_vorticity.set_clim(-vlim, vlim)
 
 		overlay = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
 		overlay[self.obstacle] = [1.0, 1.0, 1.0, 0.95]
 		self.im_obstacle1.set_array(overlay)
 		self.im_obstacle2.set_array(overlay)
+
+		core_overlay = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
+		if self.show_vortex_cores and self.display_mode != "maze":
+			q_vals = self.q_criterion[~self.obstacle]
+			if q_vals.size > 0:
+				q_thr = np.percentile(q_vals, 99.3)
+				core_mask = (self.q_criterion > q_thr) & (~self.obstacle)
+				core_overlay[core_mask] = [1.0, 1.0, 1.0, 0.45]
+		self.im_core1.set_array(core_overlay)
+		self.im_core2.set_array(core_overlay)
 
 		# Progressive path reveal: light up path cells reached by the fluid.
 		if self.display_mode == "maze" and np.any(self.maze_path_mask):
@@ -586,8 +832,11 @@ class LBMKarmanSimulation:
 			(
 				f"step={self.frame_count}  tau={self.tau:.3f}  u_in={self.u_in:.3f}  "
 				f"Re~{re:.1f}  brush={self.brush_radius}  mode={'draw' if self.draw_mode else 'erase'}\n"
+				f"MEM: Fy={self.fy_mem:+.4e}, Cl={self.cl_mem:+.3f} | "
+				f"Pressure: Fy={self.fy_pressure:+.4e}, Cl={self.cl_pressure:+.3f} | "
+				f"Gamma={self.gamma:+.4e}, Cl(gamma)={self.cl_gamma:+.3f}\n"
 				f"keys: space pause | r reset | c clear | d/e draw/erase | +/- brush | "
-				f"arrows tune | 1-4 presets | s snapshot | i load image | m toggle maze view | n NACA0012+AoA\n"
+				f"arrows tune | 1-4 presets | i image | m maze view | k Karman demo | n NACA0012+AoA | p perturb | v cores | a vorticity scale\n"
 				f"last: {self.last_action}"
 			)
 		)
@@ -597,16 +846,22 @@ class LBMKarmanSimulation:
 			self.im_vorticity,
 			self.im_obstacle1,
 			self.im_obstacle2,
+			self.im_core1,
+			self.im_core2,
 			self.status_text,
 		]
 		if self.im_path1 is not None:
 			artists.append(self.im_path1)
 		if self.im_path2 is not None:
 			artists.append(self.im_path2)
+		if self.line_cl_mem is not None:
+			artists.append(self.line_cl_mem)
+			artists.append(self.line_cl_pressure)
+			artists.append(self.line_cl_gamma)
 		return artists
 
 	def build_figure(self):
-		self.fig, (self.ax1, self.ax2) = plt.subplots(1, 2, figsize=(15, 6), facecolor="#2b2b2b")
+		self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(1, 3, figsize=(18, 6), facecolor="#2b2b2b")
 		for ax in (self.ax1, self.ax2):
 			ax.set_facecolor("#111111")
 			ax.set_xticks([])
@@ -626,6 +881,10 @@ class LBMKarmanSimulation:
 		self.im_obstacle1 = self.ax1.imshow(obstacle_overlay, interpolation="nearest")
 		self.im_obstacle2 = self.ax2.imshow(obstacle_overlay, interpolation="nearest")
 
+		core_overlay = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
+		self.im_core1 = self.ax1.imshow(core_overlay, interpolation="nearest")
+		self.im_core2 = self.ax2.imshow(core_overlay, interpolation="nearest")
+
 		# Path overlay layers (initially transparent).
 		empty_path = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
 		self.im_path1 = self.ax1.imshow(empty_path, interpolation="nearest")
@@ -633,6 +892,24 @@ class LBMKarmanSimulation:
 		if self.maze_path_overlay is not None:
 			self.im_path1.set_array(self.maze_path_overlay)
 			self.im_path2.set_array(self.maze_path_overlay)
+
+		self.ax3.set_facecolor("#0e0e0e")
+		self.ax3.set_title("Lift Coefficient History", color="white")
+		self.ax3.set_xlabel("History index (latest at right)", color="white", fontsize=9)
+		self.ax3.set_ylabel("Cl", color="white", fontsize=9)
+		self.ax3.tick_params(colors="white", labelsize=8)
+		self.ax3.grid(color="#333333", linestyle="--", linewidth=0.6, alpha=0.8)
+		self.ax3.axhline(0.0, color="#666666", linewidth=1.0)
+		self.line_cl_mem, = self.ax3.plot([], [], color="#00ffaa", linewidth=1.3, label="Cl (MEM)")
+		self.line_cl_pressure, = self.ax3.plot([], [], color="#ffd166", linewidth=1.1, label="Cl (Pressure)")
+		self.line_cl_gamma, = self.ax3.plot([], [], color="#66c2ff", linewidth=1.1, label="Cl (Gamma)")
+		legend = self.ax3.legend(loc="upper right", fontsize=8, frameon=True)
+		legend.get_frame().set_facecolor("#1a1a1a")
+		legend.get_frame().set_edgecolor("#666666")
+		for txt in legend.get_texts():
+			txt.set_color("white")
+		self.ax3.set_xlim(0, max(20, self.history_max_points))
+		self.ax3.set_ylim(-2.0, 2.0)
 
 		# Dedicated info bar under images so text never blocks the simulation view.
 		self.info_ax = self.fig.add_axes([0.02, 0.02, 0.96, 0.12])
