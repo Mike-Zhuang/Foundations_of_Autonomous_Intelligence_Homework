@@ -944,7 +944,14 @@ class LBMKarmanSimulation:
 		return artists
 
 	def build_figure(self):
-		self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(1, 3, figsize=(18, 6), facecolor="#2b2b2b")
+		self.fig = plt.figure(figsize=(18, 6), facecolor="#2b2b2b")
+		from matplotlib.gridspec import GridSpec
+		gs = GridSpec(1, 3, figure=self.fig, width_ratios=[4, 4, 3],
+					  left=0.03, right=0.97, top=0.9, bottom=0.19,
+					  wspace=0.35)
+		self.ax1 = self.fig.add_subplot(gs[0])
+		self.ax2 = self.fig.add_subplot(gs[1])
+		self.ax3 = self.fig.add_subplot(gs[2])
 		for ax in (self.ax1, self.ax2):
 			ax.set_facecolor("#111111")
 			ax.set_xticks([])
@@ -955,14 +962,14 @@ class LBMKarmanSimulation:
 
 		self.im_speed = self.ax1.imshow(speed, cmap="inferno", interpolation="nearest", vmin=0, vmax=max(0.15, self.u_in * 2.0))
 		self.ax1.set_title("Velocity Magnitude", color="white")
-		self.cbar_speed = self.fig.colorbar(self.im_speed, ax=self.ax1, fraction=0.046, pad=0.04)
-		self.cbar_speed.set_label("Speed", color="white", fontsize=8)
-		self.cbar_speed.ax.tick_params(colors="white", labelsize=7)
+		self.cbar_speed = self.fig.colorbar(self.im_speed, ax=self.ax1, fraction=0.035, pad=0.02)
+		self.cbar_speed.set_label("Speed [lu/ts]", color="white", fontsize=8)
+		self.cbar_speed.ax.tick_params(colors="white", labelsize=6)
 
 		self.im_vorticity = self.ax2.imshow(self.vorticity, cmap="seismic", interpolation="nearest", vmin=-0.15, vmax=0.15)
-		self.cbar_vorticity = self.fig.colorbar(self.im_vorticity, ax=self.ax2, fraction=0.046, pad=0.04)
-		self.cbar_vorticity.set_label("Vorticity", color="white", fontsize=8)
-		self.cbar_vorticity.ax.tick_params(colors="white", labelsize=7)
+		self.cbar_vorticity = self.fig.colorbar(self.im_vorticity, ax=self.ax2, fraction=0.035, pad=0.02)
+		self.cbar_vorticity.set_label("Vorticity \u03c9 [1/ts]", color="white", fontsize=8)
+		self.cbar_vorticity.ax.tick_params(colors="white", labelsize=6)
 		self.set_right_panel_mode(self.display_mode)
 
 		obstacle_overlay = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
@@ -985,7 +992,7 @@ class LBMKarmanSimulation:
 		self.ax3.set_facecolor("#0e0e0e")
 		self.ax3.set_title("Lift Coefficient History", color="white")
 		self.ax3.set_xlabel("History index (latest at right)", color="white", fontsize=9)
-		self.ax3.set_ylabel("Cl", color="white", fontsize=9)
+		self.ax3.set_ylabel("Cl [-]", color="white", fontsize=9)
 		self.ax3.tick_params(colors="white", labelsize=8)
 		self.ax3.grid(color="#333333", linestyle="--", linewidth=0.6, alpha=0.8)
 		self.ax3.axhline(0.0, color="#666666", linewidth=1.0)
@@ -1020,7 +1027,6 @@ class LBMKarmanSimulation:
 			family="monospace",
 		)
 
-		self.fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.19, wspace=0.08)
 		self.fig.canvas.mpl_connect("button_press_event", self.on_mouse_press)
 		self.fig.canvas.mpl_connect("button_release_event", self.on_mouse_release)
 		self.fig.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
