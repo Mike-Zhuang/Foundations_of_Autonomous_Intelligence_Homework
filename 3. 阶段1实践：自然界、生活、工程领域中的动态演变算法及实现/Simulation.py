@@ -154,19 +154,14 @@ class LBMKarmanSimulation:
 		self.obstacle = ((x - cx) / max(a, 1)) ** 2 + ((y - cy) / max(b, 1)) ** 2 <= 1.0
 
 	def set_triangle_obstacle(self):
-		"""Equilateral triangle with apex pointing upstream."""
+		"""Equilateral triangle with apex pointing upstream (half-plane intersection)."""
 		self.obstacle.fill(False)
 		cy = self.ny // 2
 		cx = self.nx // 5
 		half = max(8, self.ny // 10)
-		apex = (cx - half, cy)
-		bottom_left = (cx + half, cy + half)
-		bottom_right = (cx + half, cy - half)
-		polygon = np.array([apex, bottom_left, bottom_right], dtype=np.float64)
-		xx, yy = np.meshgrid(np.arange(self.nx), np.arange(self.ny))
-		points = np.column_stack([xx.ravel() + 0.5, yy.ravel() + 0.5])
-		mask = MplPath(polygon, closed=True).contains_points(points).reshape(self.ny, self.nx)
-		self.obstacle[mask] = True
+		y, x = np.ogrid[:self.ny, :self.nx]
+		t = np.clip(x - (cx - half), 0, None) / max(2.0 * half, 1)
+		self.obstacle = (x >= cx - half) & (x <= cx + half) & (np.abs(y - cy) <= half * t)
 
 	def set_plate_obstacle(self):
 		"""Thin flat plate perpendicular to the flow."""
@@ -182,20 +177,13 @@ class LBMKarmanSimulation:
 		self.obstacle[y0:y1, x0:x1] = True
 
 	def set_diamond_obstacle(self):
-		"""Diamond (square rotated 45 degrees)."""
+		"""Diamond / rhombus (L1-norm ball)."""
 		self.obstacle.fill(False)
 		cy = self.ny // 2
 		cx = self.nx // 5
 		half = max(8, self.ny // 10)
-		top = (cx, cy - half)
-		right = (cx + half, cy)
-		bottom = (cx, cy + half)
-		left = (cx - half, cy)
-		polygon = np.array([top, right, bottom, left], dtype=np.float64)
-		xx, yy = np.meshgrid(np.arange(self.nx), np.arange(self.ny))
-		points = np.column_stack([xx.ravel() + 0.5, yy.ravel() + 0.5])
-		mask = MplPath(polygon, closed=True).contains_points(points).reshape(self.ny, self.nx)
-		self.obstacle[mask] = True
+		y, x = np.ogrid[:self.ny, :self.nx]
+		self.obstacle = (np.abs(x - cx) + np.abs(y - cy)) <= half
 
 	def set_naca0012_obstacle(self, aoa_deg=8.0):
 		"""Create a NACA 0012 airfoil obstacle with optional angle of attack."""
@@ -930,8 +918,8 @@ class LBMKarmanSimulation:
 				f"MEM: Fy={self.fy_mem:+.4e}, Cl={self.cl_mem:+.3f} | "
 				f"Pressure: Fy={self.fy_pressure:+.4e}, Cl={self.cl_pressure:+.3f} | "
 				f"Gamma={self.gamma:+.4e}, Cl(gamma)={self.cl_gamma:+.3f}\n"
-				f"keys: space pause | r reset | c clear | d/e draw/erase | +/- brush | "
-				f"arrows tune | 1-4 presets | 5-9 shapes(sq/ellip/tri/plate/dia) | i image | m maze | k Karman | n NACA | p perturb | v cores | a scale\n"
+				f"keys: space pause | r reset | c clear | d/e draw/erase | +/- brush | arrows tune | s snapshot\n"
+				f"1-4 presets | 5 sq | 6 ellip | 7 tri | 8 plate | 9 dia | k Karman | n NACA | i image | m maze | p perturb | v cores | a scale\n"
 				f"last: {self.last_action}"
 			)
 		)
@@ -967,8 +955,14 @@ class LBMKarmanSimulation:
 
 		self.im_speed = self.ax1.imshow(speed, cmap="inferno", interpolation="nearest", vmin=0, vmax=max(0.15, self.u_in * 2.0))
 		self.ax1.set_title("Velocity Magnitude", color="white")
+		self.cbar_speed = self.fig.colorbar(self.im_speed, ax=self.ax1, fraction=0.046, pad=0.04)
+		self.cbar_speed.set_label("Speed", color="white", fontsize=8)
+		self.cbar_speed.ax.tick_params(colors="white", labelsize=7)
 
 		self.im_vorticity = self.ax2.imshow(self.vorticity, cmap="seismic", interpolation="nearest", vmin=-0.15, vmax=0.15)
+		self.cbar_vorticity = self.fig.colorbar(self.im_vorticity, ax=self.ax2, fraction=0.046, pad=0.04)
+		self.cbar_vorticity.set_label("Vorticity", color="white", fontsize=8)
+		self.cbar_vorticity.ax.tick_params(colors="white", labelsize=7)
 		self.set_right_panel_mode(self.display_mode)
 
 		obstacle_overlay = np.zeros((self.ny, self.nx, 4), dtype=np.float32)
@@ -1007,7 +1001,7 @@ class LBMKarmanSimulation:
 		self.ax3.set_ylim(-2.0, 2.0)
 
 		# Dedicated info bar under images so text never blocks the simulation view.
-		self.info_ax = self.fig.add_axes([0.02, 0.02, 0.96, 0.12])
+		self.info_ax = self.fig.add_axes([0.02, 0.01, 0.96, 0.14])
 		self.info_ax.set_facecolor("#0d0d0d")
 		self.info_ax.set_xticks([])
 		self.info_ax.set_yticks([])
@@ -1020,13 +1014,13 @@ class LBMKarmanSimulation:
 			"",
 			transform=self.info_ax.transAxes,
 			color="cyan",
-			fontsize=9,
+			fontsize=8,
 			va="center",
 			ha="left",
 			family="monospace",
 		)
 
-		self.fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.17, wspace=0.08)
+		self.fig.subplots_adjust(left=0.02, right=0.98, top=0.9, bottom=0.19, wspace=0.08)
 		self.fig.canvas.mpl_connect("button_press_event", self.on_mouse_press)
 		self.fig.canvas.mpl_connect("button_release_event", self.on_mouse_release)
 		self.fig.canvas.mpl_connect("motion_notify_event", self.on_mouse_move)
