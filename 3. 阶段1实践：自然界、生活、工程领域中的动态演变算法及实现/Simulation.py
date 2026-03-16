@@ -132,6 +132,71 @@ class LBMKarmanSimulation:
 		y, x = np.ogrid[: self.ny, : self.nx]
 		self.obstacle = (x - cx) ** 2 + (y - cy) ** 2 <= radius**2
 
+	def set_square_obstacle(self):
+		"""Square bluff body centred at the canonical position."""
+		self.obstacle.fill(False)
+		cy = self.ny // 2
+		cx = self.nx // 5
+		half = max(8, self.ny // 10)
+		y0, y1 = cy - half, cy + half
+		x0, x1 = cx - half, cx + half
+		self.obstacle[max(y0, 0):min(y1 + 1, self.ny),
+					  max(x0, 0):min(x1 + 1, self.nx)] = True
+
+	def set_ellipse_obstacle(self):
+		"""Ellipse with major axis perpendicular to the flow (aspect ratio ~2:1)."""
+		self.obstacle.fill(False)
+		cy = self.ny // 2
+		cx = self.nx // 5
+		a = max(5, self.ny // 16)   # semi-axis along flow (shorter)
+		b = max(8, self.ny // 10)   # semi-axis perpendicular to flow (longer)
+		y, x = np.ogrid[:self.ny, :self.nx]
+		self.obstacle = ((x - cx) / max(a, 1)) ** 2 + ((y - cy) / max(b, 1)) ** 2 <= 1.0
+
+	def set_triangle_obstacle(self):
+		"""Equilateral triangle with apex pointing upstream."""
+		self.obstacle.fill(False)
+		cy = self.ny // 2
+		cx = self.nx // 5
+		half = max(8, self.ny // 10)
+		apex = (cx - half, cy)
+		bottom_left = (cx + half, cy + half)
+		bottom_right = (cx + half, cy - half)
+		polygon = np.array([apex, bottom_left, bottom_right], dtype=np.float64)
+		xx, yy = np.meshgrid(np.arange(self.nx), np.arange(self.ny))
+		points = np.column_stack([xx.ravel() + 0.5, yy.ravel() + 0.5])
+		mask = MplPath(polygon, closed=True).contains_points(points).reshape(self.ny, self.nx)
+		self.obstacle[mask] = True
+
+	def set_plate_obstacle(self):
+		"""Thin flat plate perpendicular to the flow."""
+		self.obstacle.fill(False)
+		cy = self.ny // 2
+		cx = self.nx // 5
+		half_h = max(8, self.ny // 10)
+		half_w = max(1, half_h // 8)
+		y0 = max(0, cy - half_h)
+		y1 = min(self.ny, cy + half_h + 1)
+		x0 = max(0, cx - half_w)
+		x1 = min(self.nx, cx + half_w + 1)
+		self.obstacle[y0:y1, x0:x1] = True
+
+	def set_diamond_obstacle(self):
+		"""Diamond (square rotated 45 degrees)."""
+		self.obstacle.fill(False)
+		cy = self.ny // 2
+		cx = self.nx // 5
+		half = max(8, self.ny // 10)
+		top = (cx, cy - half)
+		right = (cx + half, cy)
+		bottom = (cx, cy + half)
+		left = (cx - half, cy)
+		polygon = np.array([top, right, bottom, left], dtype=np.float64)
+		xx, yy = np.meshgrid(np.arange(self.nx), np.arange(self.ny))
+		points = np.column_stack([xx.ravel() + 0.5, yy.ravel() + 0.5])
+		mask = MplPath(polygon, closed=True).contains_points(points).reshape(self.ny, self.nx)
+		self.obstacle[mask] = True
+
 	def set_naca0012_obstacle(self, aoa_deg=8.0):
 		"""Create a NACA 0012 airfoil obstacle with optional angle of attack."""
 		self.obstacle.fill(False)
@@ -731,6 +796,36 @@ class LBMKarmanSimulation:
 			self.vorticity_dynamic_scale = not self.vorticity_dynamic_scale
 			state = "dynamic" if self.vorticity_dynamic_scale else "fixed"
 			self.last_action = f"Vorticity color scale: {state}"
+		elif key == "5":
+			self.set_square_obstacle()
+			self._clear_maze_path()
+			self.set_right_panel_mode("vorticity")
+			self.reset_flow()
+			self.last_action = "Obstacle: Square bluff body"
+		elif key == "6":
+			self.set_ellipse_obstacle()
+			self._clear_maze_path()
+			self.set_right_panel_mode("vorticity")
+			self.reset_flow()
+			self.last_action = "Obstacle: Ellipse (major axis perpendicular to flow)"
+		elif key == "7":
+			self.set_triangle_obstacle()
+			self._clear_maze_path()
+			self.set_right_panel_mode("vorticity")
+			self.reset_flow()
+			self.last_action = "Obstacle: Triangle (apex upstream)"
+		elif key == "8":
+			self.set_plate_obstacle()
+			self._clear_maze_path()
+			self.set_right_panel_mode("vorticity")
+			self.reset_flow()
+			self.last_action = "Obstacle: Flat plate (perpendicular to flow)"
+		elif key == "9":
+			self.set_diamond_obstacle()
+			self._clear_maze_path()
+			self.set_right_panel_mode("vorticity")
+			self.reset_flow()
+			self.last_action = "Obstacle: Diamond (rotated square)"
 		elif key in self.presets:
 			self.set_preset(key)
 
@@ -836,7 +931,7 @@ class LBMKarmanSimulation:
 				f"Pressure: Fy={self.fy_pressure:+.4e}, Cl={self.cl_pressure:+.3f} | "
 				f"Gamma={self.gamma:+.4e}, Cl(gamma)={self.cl_gamma:+.3f}\n"
 				f"keys: space pause | r reset | c clear | d/e draw/erase | +/- brush | "
-				f"arrows tune | 1-4 presets | i image | m maze view | k Karman demo | n NACA0012+AoA | p perturb | v cores | a vorticity scale\n"
+				f"arrows tune | 1-4 presets | 5-9 shapes(sq/ellip/tri/plate/dia) | i image | m maze | k Karman | n NACA | p perturb | v cores | a scale\n"
 				f"last: {self.last_action}"
 			)
 		)
