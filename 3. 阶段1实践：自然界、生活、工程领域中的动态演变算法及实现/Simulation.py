@@ -944,11 +944,11 @@ class LBMKarmanSimulation:
 		return artists
 
 	def build_figure(self):
-		self.fig = plt.figure(figsize=(18, 6), facecolor="#2b2b2b")
+		self.fig = plt.figure(figsize=(20, 7), facecolor="#2b2b2b")
 		from matplotlib.gridspec import GridSpec
-		gs = GridSpec(1, 3, figure=self.fig, width_ratios=[4, 4, 3],
-					  left=0.03, right=0.97, top=0.9, bottom=0.19,
-					  wspace=0.35)
+		gs = GridSpec(1, 3, figure=self.fig, width_ratios=[4, 4, 2.5],
+					  left=0.02, right=0.98, top=0.93, bottom=0.15,
+					  wspace=0.22)
 		self.ax1 = self.fig.add_subplot(gs[0])
 		self.ax2 = self.fig.add_subplot(gs[1])
 		self.ax3 = self.fig.add_subplot(gs[2])
@@ -1008,7 +1008,7 @@ class LBMKarmanSimulation:
 		self.ax3.set_ylim(-2.0, 2.0)
 
 		# Dedicated info bar under images so text never blocks the simulation view.
-		self.info_ax = self.fig.add_axes([0.02, 0.01, 0.96, 0.14])
+		self.info_ax = self.fig.add_axes([0.01, 0.005, 0.98, 0.12])
 		self.info_ax.set_facecolor("#0d0d0d")
 		self.info_ax.set_xticks([])
 		self.info_ax.set_yticks([])
@@ -1021,7 +1021,7 @@ class LBMKarmanSimulation:
 			"",
 			transform=self.info_ax.transAxes,
 			color="cyan",
-			fontsize=8,
+			fontsize=7.5,
 			va="center",
 			ha="left",
 			family="monospace",
