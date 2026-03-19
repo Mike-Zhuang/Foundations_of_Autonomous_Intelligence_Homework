@@ -7,7 +7,7 @@ flowchart LR
   classDef phys fill:#f0fff4,stroke:#2f855a,stroke-width:2px,color:#22543d;
   classDef io fill:#faf5ff,stroke:#6b46c1,stroke-width:2px,color:#44337a;
 
-  subgraph LEFT[左侧总览（竖向主干）]
+  subgraph LEFT[总览]
     direction TB
     L0[Simulation.py]
     L1[常量定义\nCX CY W OPP]
@@ -17,7 +17,7 @@ flowchart LR
     L0 --> L1 --> L2 --> L3 --> L4
   end
 
-  subgraph A[右上：数值求解主链（横向）]
+  subgraph A[数值求解主链]
     direction LR
     A0[reset_flow]
     A1[compute_macroscopic]
@@ -30,7 +30,7 @@ flowchart LR
     A0 --> A1 --> A2 --> A3 --> A4 --> A5 --> A6 --> A7
   end
 
-  subgraph B[右中：物理量与可视化（横向）]
+  subgraph B[物理量与可视化]
     direction LR
     B0[compute_vorticity]
     B1[compute_q_criterion]
@@ -41,7 +41,7 @@ flowchart LR
     B0 --> B1 --> B2 --> B3 --> B4 --> B5
   end
 
-  subgraph C[右下：交互与工程化（横向）]
+  subgraph C[交互与工程化]
     direction LR
     C0[鼠标交互\n绘制障碍]
     C1[键盘交互\n预设与参数]
