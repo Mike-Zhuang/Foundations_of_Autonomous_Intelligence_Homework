@@ -946,9 +946,10 @@ class LBMKarmanSimulation:
 	def build_figure(self):
 		self.fig = plt.figure(figsize=(20, 7), facecolor="#2b2b2b")
 		from matplotlib.gridspec import GridSpec
+		# 适当增大列间距，避免中间图色标标签与右侧升力系数坐标轴标题拥挤重叠。
 		gs = GridSpec(1, 3, figure=self.fig, width_ratios=[4, 4, 2.5],
 					  left=0.02, right=0.98, top=0.93, bottom=0.15,
-					  wspace=0.22)
+					  wspace=0.28)
 		self.ax1 = self.fig.add_subplot(gs[0])
 		self.ax2 = self.fig.add_subplot(gs[1])
 		self.ax3 = self.fig.add_subplot(gs[2])
